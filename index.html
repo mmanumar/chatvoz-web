@@ -1,23 +1,39 @@
 <!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Chat voz v3.1</title>
+<title>Chat voz v3.3</title>
 <style>body{font:18px system-ui;margin:16px;max-width:640px}button{font:inherit;padding:14px 18px;margin:4px 4px 4px 0}#parar{background:#c00;color:#fff;border:0;border-radius:12px;width:100%;padding:30px 0;font-size:26px;font-weight:700;margin:10px 0}#log{white-space:pre-wrap;border:1px solid #ccc;padding:8px;min-height:8em}#est{font-weight:600}</style>
-<h2>Chat voz (prototipo) <small>v3.1</small></h2>
+<h2>Chat voz (prototipo) <small>v3.3</small></h2>
 <p id="est" style="font-weight:bold;padding:12px;border-radius:8px;background:#eee">Parado</p>
 <button id="parar">PARAR</button><br><button id="esc" style="display:none">ESCUCHAR otra vez</button><button id="ini">Iniciar</button><button id="emp">Emparejar</button>
 <p>Silencio antes de enviar (s): <input id="sil" type="number" value="6" min="2" max="30" style="width:4em"></p>
+<p id="dg" style="font:13px monospace;color:#555">v3.3 sin ciclos todavía</p>
 <div id="log"></div>
 <script>
 // Sin secretos en este archivo. El token del dispositivo lo entrega el servidor tras aprobar el codigo y se guarda solo en este navegador.
 const URL_SERVICIO = 'https://script.google.com/macros/s/AKfycbxf_NuM67zps7yyUO6rXRtebunsJPz3su5z2f7cKL4ggObfsyuCZySR7bRJ5dptPDPi/exec';
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const $ = id => document.getElementById(id);
-let ultprov = '', vacios = 0, rt = null, gen = 0, wl = null, tok = localStorage.getItem('cv_tok') || '', ses = '', activo = false, hablando = false, rec = null, buf = '', tmr = null, esperando = false, poll = null;
+let curtxt = '', ciclos = 0, reinicios = [], ultprov = '', vacios = 0, rt = null, gen = 0, wl = null, tok = localStorage.getItem('cv_tok') || '', ses = '', activo = false, hablando = false, rec = null, buf = '', tmr = null, esperando = false, poll = null;
 const log = t => { $('log').textContent += t + '\n'; };
+const tr = m => { try { api('traza', '', '', String(m).slice(0, 40)).catch(() => {}); } catch (e) {} };   // marca corta sin texto dictado ni token
+const dg = m => { $('dg').textContent = 'v3.3 ' + m; };
 const est = (t, c) => { const e = $('est'); e.textContent = t; e.style.background = c || '#eee'; e.style.color = (c && c !== '#eee') ? '#fff' : '#000'; };
 async function api(accion, s, mid, texto, token) {
   const cuerpo = [token === undefined ? tok : token, accion, s || '', mid || '', texto || ''].join('\n');
   const r = await fetch(URL_SERVICIO, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: cuerpo });
   return (await r.text()).trim();
+}
+const nz = t => t.toLowerCase().replace(/[.,;:!?¡¿]/g, '').replace(/\s+/g, ' ').trim();
+function colapsar(res) {   // Chrome Android entrega cada resultado como prefijo creciente del anterior: se queda con el más largo de cada cadena
+  const partes = []; let cur = '';
+  for (let i = 0; i < res.length; i++) {
+    const t = res[i][0].transcript.trim(); if (!t) continue;
+    if (!cur) { cur = t; continue; }
+    const a = nz(cur), b = nz(t);
+    if (b.startsWith(a) || a.startsWith(b) || (a.split(' ')[0] === b.split(' ')[0] && b.length >= a.length * 0.6)) { if (b.length >= a.length) cur = t; }
+    else { partes.push(cur); cur = t; }
+  }
+  if (cur) partes.push(cur);
+  return partes.join(' ');
 }
 const norm = t => t.toLowerCase().replace(/[.,;:!?¡¿]/g, '').replace(/\s+/g, ' ').trim();
 function hablar(t) {
@@ -33,41 +49,45 @@ function hablar(t) {
   });
 }
 function abortar_rec() { if (rec) { rec.onend = null; rec.onresult = null; try { rec.abort(); } catch (e) {} rec = null; } }
-function detener_escucha() { ultprov = ''; abortar_rec(); clearTimeout(tmr); clearTimeout(rt); }
+function detener_escucha() { curtxt = ''; abortar_rec(); clearTimeout(tmr); clearTimeout(rt); }
 function pausar(msg) { abortar_rec(); clearTimeout(rt); est('PAUSA: ' + msg, '#b60'); $('esc').style.display = ''; log(msg); }
 function escuchar() {
   if (!activo || hablando || esperando) return;
   abortar_rec(); clearTimeout(rt); $('esc').style.display = 'none';   // no borra el temporizador de envio: Chrome corta y reabre sin perder el turno
-  const mia = gen; rec = new SR(); rec.lang = 'es-ES'; rec.continuous = true; rec.interimResults = true;
-  rec.onstart = () => { if (mia === gen) est('ESCUCHANDO: habla ahora', '#080'); };
+  const mia = gen; const st = { t0: Date.now(), r: 0, f: 0, e: '-' }; ciclos++; rec = new SR(); rec.lang = 'es-ES'; rec.continuous = true; rec.interimResults = true;
+  rec.onstart = () => { st.t0 = Date.now(); if (mia === gen) est('ESCUCHANDO: habla ahora', '#080'); };
   rec.onresult = e => {
     if (mia !== gen || hablando || esperando) return;
-    vacios = 0;
-    let fin = '', prov = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) (e.results[i].isFinal ? (fin += e.results[i][0].transcript + ' ') : (prov += e.results[i][0].transcript));
-    if (fin) buf += fin;
-    ultprov = prov.trim();
+    st.r++;
+    const antes = curtxt.length;
+    curtxt = colapsar(e.results);   // texto completo de ESTA sesión del reconocedor, sin duplicados
+    if (curtxt.length > antes) { st.f++; vacios = 0; }   // solo texto nuevo cuenta como voz
     clearTimeout(tmr);
-    if (buf.trim() || prov) tmr = setTimeout(enviar, Math.max(2, +$('sil').value) * 1000);   // el temporizador se reinicia con cada voz
+    if (buf.trim() || curtxt) tmr = setTimeout(enviar, Math.max(2, +$('sil').value) * 1000);   // el temporizador se reinicia con cada voz
   };
   rec.onend = () => {
     if (mia !== gen || !activo || hablando || esperando) return;
-    if (ultprov) { buf += ultprov + ' '; ultprov = ''; }   // no perder el fragmento provisional si Chrome corta antes de cerrarlo
-    vacios++;   // cada reinicio del reconocedor hace sonar el pitido de Android: se espacia y, si nadie habla, se detiene
+    const dur = ((Date.now() - st.t0) / 1000).toFixed(1), ahora = Date.now();
+    const marca = 'c' + ciclos + ' d' + dur + ' r' + st.r + 'f' + st.f + ' e:' + st.e;
+    dg('ciclo ' + ciclos + ': ' + dur + ' s, resultados ' + st.r + ' (finales ' + st.f + '), error ' + st.e); tr(marca);
+    if (curtxt) { buf += curtxt + ' '; curtxt = ''; }   // pasa al buffer el texto de esta sesión
+    if (!st.f) vacios++;   // cada reinicio del reconocedor hace sonar el pitido de Android
+    reinicios = reinicios.filter(t => ahora - t < 60000); reinicios.push(ahora);
+    if (reinicios.length >= 7) return pausar('demasiados reinicios en 1 minuto (' + reinicios.length + '); pulsa ESCUCHAR otra vez');   // cada reinicio del reconocedor hace sonar el pitido de Android: se espacia y, si nadie habla, se detiene
     if (vacios >= 4) return pausar('sin voz detectada; pulsa ESCUCHAR otra vez');
     est('Reabriendo el micrófono...', '#b60');
     rt = setTimeout(escuchar, vacios <= 1 ? 400 : 1500 * (vacios - 1));
   };   // el navegador corta por silencio: reabrir sin perder el buffer
   rec.onerror = e => {
     if (mia !== gen) return;
+    st.e = String(e.error).slice(0, 8);
     if (e.error === 'not-allowed' || e.error === 'service-not-allowed') { log('Sin permiso de micrófono.'); est('ERROR: sin permiso de micrófono', '#c00'); parar(true); }
     else if (e.error === 'audio-capture' || e.error === 'network') { abortar_rec(); pausar('error del reconocimiento (' + e.error + '); pulsa ESCUCHAR otra vez'); }
   };
   try { rec.start(); } catch (e) {}
 }
 async function enviar() {
-  if (ultprov) { buf += ' ' + ultprov; ultprov = ''; }
-  const t = buf.trim(); buf = ''; if (!t || !activo) return;
+  const t = (buf + ' ' + curtxt).replace(/\s+/g, ' ').trim(); buf = ''; curtxt = ''; if (!t || !activo) return;
   const g = gen; detener_escucha(); esperando = true; est('Enviando...', '#05a');
   if (norm(t) === 'fin del chat') { await parar(); return; }
   log('Tú: ' + t);
@@ -104,7 +124,7 @@ async function iniciar() {
   const r = await api('inicio', '', '', '');
   if (!/^\d+$/.test(r)) return log('No se pudo abrir: ' + r);
   gen++; ses = r; activo = true;
-  try { wl = await navigator.wakeLock.request('screen'); } catch (e) {} esperando = false; buf = ''; log('Inicio del chat');
+  try { wl = await navigator.wakeLock.request('screen'); } catch (e) {} esperando = false; buf = ''; log('Inicio del chat'); reinicios = []; ciclos = 0; tr('ini v3.3');
   vacios = 0; await hablar('Inicio del chat.'); escuchar();
 }
 async function parar(silencioso) {   // PARAR: corta la voz, cierra el micrófono y la sesión
