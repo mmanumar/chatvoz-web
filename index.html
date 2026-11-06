@@ -1,7 +1,7 @@
 <!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Chat voz (prototipo local)</title>
+<title>Chat voz v3.1</title>
 <style>body{font:18px system-ui;margin:16px;max-width:640px}button{font:inherit;padding:14px 18px;margin:4px 4px 4px 0}#parar{background:#c00;color:#fff;border:0;border-radius:12px;width:100%;padding:30px 0;font-size:26px;font-weight:700;margin:10px 0}#log{white-space:pre-wrap;border:1px solid #ccc;padding:8px;min-height:8em}#est{font-weight:600}</style>
-<h2>Chat voz (prototipo)</h2>
+<h2>Chat voz (prototipo) <small>v3.1</small></h2>
 <p id="est" style="font-weight:bold;padding:12px;border-radius:8px;background:#eee">Parado</p>
 <button id="parar">PARAR</button><br><button id="esc" style="display:none">ESCUCHAR otra vez</button><button id="ini">Iniciar</button><button id="emp">Emparejar</button>
 <p>Silencio antes de enviar (s): <input id="sil" type="number" value="6" min="2" max="30" style="width:4em"></p>
@@ -11,7 +11,7 @@
 const URL_SERVICIO = 'https://script.google.com/macros/s/AKfycbxf_NuM67zps7yyUO6rXRtebunsJPz3su5z2f7cKL4ggObfsyuCZySR7bRJ5dptPDPi/exec';
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const $ = id => document.getElementById(id);
-let vacios = 0, rt = null, gen = 0, wl = null, tok = localStorage.getItem('cv_tok') || '', ses = '', activo = false, hablando = false, rec = null, buf = '', tmr = null, esperando = false, poll = null;
+let ultprov = '', vacios = 0, rt = null, gen = 0, wl = null, tok = localStorage.getItem('cv_tok') || '', ses = '', activo = false, hablando = false, rec = null, buf = '', tmr = null, esperando = false, poll = null;
 const log = t => { $('log').textContent += t + '\n'; };
 const est = (t, c) => { const e = $('est'); e.textContent = t; e.style.background = c || '#eee'; e.style.color = (c && c !== '#eee') ? '#fff' : '#000'; };
 async function api(accion, s, mid, texto, token) {
@@ -33,7 +33,7 @@ function hablar(t) {
   });
 }
 function abortar_rec() { if (rec) { rec.onend = null; rec.onresult = null; try { rec.abort(); } catch (e) {} rec = null; } }
-function detener_escucha() { abortar_rec(); clearTimeout(tmr); clearTimeout(rt); }
+function detener_escucha() { ultprov = ''; abortar_rec(); clearTimeout(tmr); clearTimeout(rt); }
 function pausar(msg) { abortar_rec(); clearTimeout(rt); est('PAUSA: ' + msg, '#b60'); $('esc').style.display = ''; log(msg); }
 function escuchar() {
   if (!activo || hablando || esperando) return;
@@ -46,11 +46,13 @@ function escuchar() {
     let fin = '', prov = '';
     for (let i = e.resultIndex; i < e.results.length; i++) (e.results[i].isFinal ? (fin += e.results[i][0].transcript + ' ') : (prov += e.results[i][0].transcript));
     if (fin) buf += fin;
+    ultprov = prov.trim();
     clearTimeout(tmr);
     if (buf.trim() || prov) tmr = setTimeout(enviar, Math.max(2, +$('sil').value) * 1000);   // el temporizador se reinicia con cada voz
   };
   rec.onend = () => {
     if (mia !== gen || !activo || hablando || esperando) return;
+    if (ultprov) { buf += ultprov + ' '; ultprov = ''; }   // no perder el fragmento provisional si Chrome corta antes de cerrarlo
     vacios++;   // cada reinicio del reconocedor hace sonar el pitido de Android: se espacia y, si nadie habla, se detiene
     if (vacios >= 4) return pausar('sin voz detectada; pulsa ESCUCHAR otra vez');
     est('Reabriendo el micrófono...', '#b60');
@@ -64,6 +66,7 @@ function escuchar() {
   try { rec.start(); } catch (e) {}
 }
 async function enviar() {
+  if (ultprov) { buf += ' ' + ultprov; ultprov = ''; }
   const t = buf.trim(); buf = ''; if (!t || !activo) return;
   const g = gen; detener_escucha(); esperando = true; est('Enviando...', '#05a');
   if (norm(t) === 'fin del chat') { await parar(); return; }
