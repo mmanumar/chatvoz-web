@@ -83,7 +83,7 @@ async function enviar() {
   }, 4000);
 }
 async function iniciar() {
-  if (!SR) return log('Este navegador no tiene reconocimiento de voz.');
+  if (!SR) return log('Este navegador no ofrece la función de dictado de esta página. Prueba en Google Chrome; no es un problema del permiso del micrófono.');
   if (!tok) return log('Falta emparejar este navegador.');
   const r = await api('inicio', '', '', '');
   if (!/^\d+$/.test(r)) return log('No se pudo abrir: ' + r);
@@ -97,13 +97,15 @@ async function parar(silencioso) {   // PARAR: corta la voz, cierra el micrófon
   if (s) { try { await api('fin', s, '', ''); } catch (e) {} }
   if (!silencioso) log('Parado.');
 }
-async function emparejar() {   // mismo protocolo que la macro: solicitar -> codigo -> reclamar
+async function emparejar() {
+  if (!SR) return log('Este navegador no ofrece la función de dictado de esta página. Prueba en Google Chrome; no es un problema del permiso del micrófono.');   // mismo protocolo que la macro: solicitar -> codigo -> reclamar
   const s = await api('solicitar', '', '', '', '-'); if (!/^[0-9a-f]{64}$/.test(s)) return log('No se pudo pedir: ' + s);
   const c = await api('codigo', s, '', '', '-'); if (!/^\d{6}$/.test(c)) return log('No se pudo obtener código: ' + c);
   log('Código: ' + c + '. Díselo a Insti por WhatsApp. Espero hasta 10 min.');
   for (let i = 0; i < 60; i++) { const r = await api('reclamar', s, '', '', '-'); if (/^[0-9a-f]{64}$/.test(r)) { tok = r; localStorage.setItem('cv_tok', r); return log('Emparejado.'); } if (r !== 'ESPERA') return log('No se emparejó: ' + r); await new Promise(z => setTimeout(z, 10000)); }
   log('Tiempo agotado.');
 }
+if (!SR) log('Este navegador no ofrece la función de dictado de esta página. Prueba en Google Chrome; no es un problema del permiso del micrófono.');
 $('ini').onclick = iniciar; $('parar').onclick = () => parar(); $('emp').onclick = emparejar;
 addEventListener('pagehide', () => { if (activo) parar(true); });
 </script></html>
