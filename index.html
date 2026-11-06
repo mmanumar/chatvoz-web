@@ -1,11 +1,11 @@
 <!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Chat voz v3.6</title>
+<title>Chat voz v3.7</title>
 <style>body{font:18px system-ui;margin:16px;max-width:640px}button{font:inherit;padding:14px 18px;margin:4px 4px 4px 0}#parar{background:#c00;color:#fff;border:0;border-radius:12px;width:100%;padding:30px 0;font-size:26px;font-weight:700;margin:10px 0}#log{white-space:pre-wrap;border:1px solid #ccc;padding:8px;min-height:8em}#est{font-weight:600}</style>
-<h2>Chat voz (prototipo) <small>v3.6</small></h2>
+<h2>Chat voz (prototipo) <small>v3.7</small></h2>
 <p id="est" style="font-weight:bold;padding:12px;border-radius:8px;background:#eee">Parado</p>
 <button id="parar">PARAR</button><br><button id="esc" style="display:none">ESCUCHAR otra vez</button><button id="oir" style="display:none">OÍR la respuesta</button><button id="ini">Iniciar</button><button id="emp">Emparejar</button>
 <p>Silencio antes de enviar (s): <input id="sil" type="number" value="6" min="2" max="30" style="width:4em"></p>
-<p id="dg" style="font:13px monospace;color:#555">v3.5 sin ciclos todavía</p>
+<p id="dg" style="font:13px monospace;color:#555">v3.7 sin ciclos todavía</p>
 <div id="log"></div>
 <script>
 // Sin secretos en este archivo. El token del dispositivo lo entrega el servidor tras aprobar el codigo y se guarda solo en este navegador.
@@ -15,12 +15,15 @@ const $ = id => document.getElementById(id);
 let sinResp = false, ultResp = '', vozPendiente = false, evn = 0, curtxt = '', ciclos = 0, reinicios = [], ultprov = '', vacios = 0, rt = null, gen = 0, wl = null, tok = localStorage.getItem('cv_tok') || '', ses = '', activo = false, hablando = false, rec = null, buf = '', tmr = null, esperando = false, poll = null;
 const log = t => { $('log').textContent += t + '\n'; };
 const tr = m => { try { api('traza', '', '', String(m).slice(0, 40)).catch(() => {}); } catch (e) {} };   // marca corta sin texto dictado ni token
-const dg = m => { $('dg').textContent = 'v3.6 ' + m; };
+const dg = m => { $('dg').textContent = 'v3.7 ' + m; };
 const est = (t, c) => { const e = $('est'); e.textContent = t; e.style.background = c || '#eee'; e.style.color = (c && c !== '#eee') ? '#fff' : '#000'; };
 async function api(accion, s, mid, texto, token) {
   const cuerpo = [token === undefined ? tok : token, accion, s || '', mid || '', texto || ''].join('\n');
-  const r = await fetch(URL_SERVICIO, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: cuerpo });
-  return (await r.text()).trim();
+  const ac = new AbortController(); const tmt = setTimeout(() => ac.abort(), 20000);   // v3.7: una peticion colgada no puede bloquear el bucle
+  try {
+    const r = await fetch(URL_SERVICIO, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: cuerpo, signal: ac.signal });
+    return (await r.text()).trim();
+  } finally { clearTimeout(tmt); }
 }
 const nz = t => t.toLowerCase().replace(/[.,;:!?¡¿]/g, '').replace(/\s+/g, ' ').trim();
 function colapsar(res) {
@@ -102,7 +105,7 @@ async function enviar() {
   log('Tú: ' + t);
   let enviado = false, ult = '';
   for (let i = 0; i < 3; i++) {
-    const r = await api('enviar', ses, String(Math.floor(Math.random() * 2e9)), t);
+    let r; try { r = await api('enviar', ses, String(Math.floor(Math.random() * 2e9)), t); } catch (e) { r = 'ERR red'; }   // v3.7: un fallo de red cuenta como intento fallido, no congela el envio
     if (g !== gen) return;
     ult = r;
     if (r === 'OK') { enviado = true; break; }
@@ -111,13 +114,15 @@ async function enviar() {
   }
   if (g !== gen) return;
   if (!enviado) { log('NO enviado: ' + ult.slice(0, 40)); tr('env fallo ' + ult.slice(0, 24)); esperando = false; vacios = 0; escuchar(); return; }
-  sinResp = true; est('Esperando respuesta de Insti', '#05a'); let n = 0, ocupado = false; const ti = Date.now(); let avisado = false;
+  sinResp = true; est('Esperando respuesta de Insti', '#05a'); let n = 0, ocupado = false, errRed = 0; const ti = Date.now(); let avisado = false;
   poll = setInterval(async () => {
     if (g !== gen || !activo) return clearInterval(poll);
     if (ocupado) return; ocupado = true; if (!avisado && Date.now() - ti > 75000) { avisado = true; log('Sigo esperando respuesta de Insti (la frase llegó).'); }
     if (++n > 225) { clearInterval(poll); log('Sin respuesta en 15 min.'); return parar(); }   // ~4 s por vuelta
-    const r = await api('recoger', ses, '', '');
-    ocupado = false;
+    let r;
+    try { r = await api('recoger', ses, '', ''); }   // v3.7: ni fallo de red ni timeout dejan ocupado bloqueado ni impiden PARAR
+    catch (e) { ocupado = false; errRed++; if (errRed === 1 || errRed % 15 === 0) tr('recoger red x' + errRed); if (errRed === 3) est('Sin conexion; sigo esperando respuesta', '#b60'); return; }
+    ocupado = false; if (errRed) { errRed = 0; est('Esperando respuesta de Insti', '#05a'); }
     if (g !== gen || !activo) return clearInterval(poll);   // PARAR llego mientras tanto: no reproducir respuesta vieja
     if (r === '§VACIO§' || r === '') return;
     clearInterval(poll);
@@ -143,7 +148,7 @@ async function iniciar() {
   const r = await api('inicio', '', '', '');
   if (!/^\d+$/.test(r)) return log('No se pudo abrir: ' + r);
   gen++; ses = r; activo = true;
-  try { wl = await navigator.wakeLock.request('screen'); } catch (e) {} esperando = false; buf = ''; log('Inicio del chat'); reinicios = []; ciclos = 0; evn = 0; tr('ini v3.6');
+  try { wl = await navigator.wakeLock.request('screen'); } catch (e) {} esperando = false; buf = ''; log('Inicio del chat'); reinicios = []; ciclos = 0; evn = 0; tr('ini v3.7');
   vacios = 0; await hablar('Inicio del chat.'); escuchar();
 }
 async function parar(silencioso) {   // PARAR: corta la voz, cierra el micrófono y la sesión
