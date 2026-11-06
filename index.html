@@ -2,8 +2,8 @@
 <title>Chat voz (prototipo local)</title>
 <style>body{font:18px system-ui;margin:16px;max-width:640px}button{font:inherit;padding:14px 18px;margin:4px 4px 4px 0}#parar{background:#c00;color:#fff;border:0;border-radius:12px;width:100%;padding:30px 0;font-size:26px;font-weight:700;margin:10px 0}#log{white-space:pre-wrap;border:1px solid #ccc;padding:8px;min-height:8em}#est{font-weight:600}</style>
 <h2>Chat voz (prototipo)</h2>
-<p id="est">Parado</p>
-<button id="parar">PARAR</button><br><button id="ini">Iniciar</button><button id="emp">Emparejar</button>
+<p id="est" style="font-weight:bold;padding:12px;border-radius:8px;background:#eee">Parado</p>
+<button id="parar">PARAR</button><br><button id="esc" style="display:none">ESCUCHAR otra vez</button><button id="ini">Iniciar</button><button id="emp">Emparejar</button>
 <p>Silencio antes de enviar (s): <input id="sil" type="number" value="6" min="2" max="30" style="width:4em"></p>
 <div id="log"></div>
 <script>
@@ -11,9 +11,9 @@
 const URL_SERVICIO = 'https://script.google.com/macros/s/AKfycbxf_NuM67zps7yyUO6rXRtebunsJPz3su5z2f7cKL4ggObfsyuCZySR7bRJ5dptPDPi/exec';
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const $ = id => document.getElementById(id);
-let gen = 0, wl = null, tok = localStorage.getItem('cv_tok') || '', ses = '', activo = false, hablando = false, rec = null, buf = '', tmr = null, esperando = false, poll = null;
+let vacios = 0, rt = null, gen = 0, wl = null, tok = localStorage.getItem('cv_tok') || '', ses = '', activo = false, hablando = false, rec = null, buf = '', tmr = null, esperando = false, poll = null;
 const log = t => { $('log').textContent += t + '\n'; };
-const est = t => { $('est').textContent = t; };
+const est = (t, c) => { const e = $('est'); e.textContent = t; e.style.background = c || '#eee'; e.style.color = (c && c !== '#eee') ? '#fff' : '#000'; };
 async function api(accion, s, mid, texto, token) {
   const cuerpo = [token === undefined ? tok : token, accion, s || '', mid || '', texto || ''].join('\n');
   const r = await fetch(URL_SERVICIO, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: cuerpo });
@@ -22,7 +22,7 @@ async function api(accion, s, mid, texto, token) {
 const norm = t => t.toLowerCase().replace(/[.,;:!?¡¿]/g, '').replace(/\s+/g, ' ').trim();
 function hablar(t) {
   return new Promise(res => {
-    detener_escucha(); hablando = true; est('Hablando');
+    detener_escucha(); hablando = true; est('Insti HABLA: no hables', '#05a');
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(t); u.lang = 'es-ES';
     let hecho = false;
@@ -33,26 +33,39 @@ function hablar(t) {
   });
 }
 function abortar_rec() { if (rec) { rec.onend = null; rec.onresult = null; try { rec.abort(); } catch (e) {} rec = null; } }
-function detener_escucha() { abortar_rec(); clearTimeout(tmr); }
+function detener_escucha() { abortar_rec(); clearTimeout(tmr); clearTimeout(rt); }
+function pausar(msg) { abortar_rec(); clearTimeout(rt); est('PAUSA: ' + msg, '#b60'); $('esc').style.display = ''; log(msg); }
 function escuchar() {
   if (!activo || hablando || esperando) return;
-  abortar_rec(); est('Escuchando');   // no borra el temporizador de envio: Chrome corta y reabre sin perder el turno
+  abortar_rec(); clearTimeout(rt); $('esc').style.display = 'none';   // no borra el temporizador de envio: Chrome corta y reabre sin perder el turno
   const mia = gen; rec = new SR(); rec.lang = 'es-ES'; rec.continuous = true; rec.interimResults = true;
+  rec.onstart = () => { if (mia === gen) est('ESCUCHANDO: habla ahora', '#080'); };
   rec.onresult = e => {
     if (mia !== gen || hablando || esperando) return;
+    vacios = 0;
     let fin = '', prov = '';
     for (let i = e.resultIndex; i < e.results.length; i++) (e.results[i].isFinal ? (fin += e.results[i][0].transcript + ' ') : (prov += e.results[i][0].transcript));
     if (fin) buf += fin;
     clearTimeout(tmr);
     if (buf.trim() || prov) tmr = setTimeout(enviar, Math.max(2, +$('sil').value) * 1000);   // el temporizador se reinicia con cada voz
   };
-  rec.onend = () => { if (activo && !hablando && !esperando) setTimeout(escuchar, 150); };   // el navegador corta por silencio: reabrir sin perder el buffer
-  rec.onerror = e => { if (e.error === 'not-allowed') { log('Sin permiso de micrófono.'); parar(); } };
+  rec.onend = () => {
+    if (mia !== gen || !activo || hablando || esperando) return;
+    vacios++;   // cada reinicio del reconocedor hace sonar el pitido de Android: se espacia y, si nadie habla, se detiene
+    if (vacios >= 4) return pausar('sin voz detectada; pulsa ESCUCHAR otra vez');
+    est('Reabriendo el micrófono...', '#b60');
+    rt = setTimeout(escuchar, vacios <= 1 ? 400 : 1500 * (vacios - 1));
+  };   // el navegador corta por silencio: reabrir sin perder el buffer
+  rec.onerror = e => {
+    if (mia !== gen) return;
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') { log('Sin permiso de micrófono.'); est('ERROR: sin permiso de micrófono', '#c00'); parar(true); }
+    else if (e.error === 'audio-capture' || e.error === 'network') { abortar_rec(); pausar('error del reconocimiento (' + e.error + '); pulsa ESCUCHAR otra vez'); }
+  };
   try { rec.start(); } catch (e) {}
 }
 async function enviar() {
   const t = buf.trim(); buf = ''; if (!t || !activo) return;
-  const g = gen; detener_escucha(); esperando = true; est('Enviando');
+  const g = gen; detener_escucha(); esperando = true; est('Enviando...', '#05a');
   if (norm(t) === 'fin del chat') { await parar(); return; }
   log('Tú: ' + t);
   for (let i = 0; i < 3; i++) {
@@ -63,7 +76,7 @@ async function enviar() {
     await new Promise(z => setTimeout(z, 4000));
   }
   if (g !== gen) return;
-  est('Esperando respuesta'); let n = 0, ocupado = false;
+  est('Esperando respuesta de Insti', '#05a'); let n = 0, ocupado = false;
   poll = setInterval(async () => {
     if (g !== gen || !activo) return clearInterval(poll);
     if (ocupado) return; ocupado = true;
@@ -79,7 +92,7 @@ async function enviar() {
     await hablar(r);
     if (g !== gen || !activo) return;
     await api('ack', ses, '', '');
-    esperando = false; escuchar();
+    esperando = false; vacios = 0; escuchar();
   }, 4000);
 }
 async function iniciar() {
@@ -89,11 +102,11 @@ async function iniciar() {
   if (!/^\d+$/.test(r)) return log('No se pudo abrir: ' + r);
   gen++; ses = r; activo = true;
   try { wl = await navigator.wakeLock.request('screen'); } catch (e) {} esperando = false; buf = ''; log('Inicio del chat');
-  await hablar('Inicio del chat.'); escuchar();
+  vacios = 0; await hablar('Inicio del chat.'); escuchar();
 }
 async function parar(silencioso) {   // PARAR: corta la voz, cierra el micrófono y la sesión
   gen++; try { if (wl) wl.release(); } catch (e) {} wl = null; speechSynthesis.cancel(); clearInterval(poll); detener_escucha();
-  const s = ses; activo = false; hablando = false; esperando = false; ses = ''; est('Parado');
+  const s = ses; activo = false; hablando = false; esperando = false; ses = ''; est('Parado');$('esc').style.display = 'none';
   if (s) { try { await api('fin', s, '', ''); } catch (e) {} }
   if (!silencioso) log('Parado.');
 }
@@ -106,6 +119,7 @@ async function emparejar() {
   log('Tiempo agotado.');
 }
 if (!SR) log('Este navegador no ofrece la función de dictado de esta página. Prueba en Google Chrome; no es un problema del permiso del micrófono.');
+$('esc').onclick = () => { if (activo && !hablando && !esperando) { vacios = 0; escuchar(); } };
 $('ini').onclick = iniciar; $('parar').onclick = () => parar(); $('emp').onclick = emparejar;
 addEventListener('pagehide', () => { if (activo) parar(true); });
 </script></html>
