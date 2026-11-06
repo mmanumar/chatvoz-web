@@ -1,21 +1,21 @@
 <!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Chat voz v3.4</title>
+<title>Chat voz v3.6</title>
 <style>body{font:18px system-ui;margin:16px;max-width:640px}button{font:inherit;padding:14px 18px;margin:4px 4px 4px 0}#parar{background:#c00;color:#fff;border:0;border-radius:12px;width:100%;padding:30px 0;font-size:26px;font-weight:700;margin:10px 0}#log{white-space:pre-wrap;border:1px solid #ccc;padding:8px;min-height:8em}#est{font-weight:600}</style>
-<h2>Chat voz (prototipo) <small>v3.4</small></h2>
+<h2>Chat voz (prototipo) <small>v3.6</small></h2>
 <p id="est" style="font-weight:bold;padding:12px;border-radius:8px;background:#eee">Parado</p>
-<button id="parar">PARAR</button><br><button id="esc" style="display:none">ESCUCHAR otra vez</button><button id="ini">Iniciar</button><button id="emp">Emparejar</button>
+<button id="parar">PARAR</button><br><button id="esc" style="display:none">ESCUCHAR otra vez</button><button id="oir" style="display:none">OÍR la respuesta</button><button id="ini">Iniciar</button><button id="emp">Emparejar</button>
 <p>Silencio antes de enviar (s): <input id="sil" type="number" value="6" min="2" max="30" style="width:4em"></p>
-<p id="dg" style="font:13px monospace;color:#555">v3.4 sin ciclos todavía</p>
+<p id="dg" style="font:13px monospace;color:#555">v3.5 sin ciclos todavía</p>
 <div id="log"></div>
 <script>
 // Sin secretos en este archivo. El token del dispositivo lo entrega el servidor tras aprobar el codigo y se guarda solo en este navegador.
 const URL_SERVICIO = 'https://script.google.com/macros/s/AKfycbxf_NuM67zps7yyUO6rXRtebunsJPz3su5z2f7cKL4ggObfsyuCZySR7bRJ5dptPDPi/exec';
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const $ = id => document.getElementById(id);
-let evn = 0, curtxt = '', ciclos = 0, reinicios = [], ultprov = '', vacios = 0, rt = null, gen = 0, wl = null, tok = localStorage.getItem('cv_tok') || '', ses = '', activo = false, hablando = false, rec = null, buf = '', tmr = null, esperando = false, poll = null;
+let sinResp = false, ultResp = '', vozPendiente = false, evn = 0, curtxt = '', ciclos = 0, reinicios = [], ultprov = '', vacios = 0, rt = null, gen = 0, wl = null, tok = localStorage.getItem('cv_tok') || '', ses = '', activo = false, hablando = false, rec = null, buf = '', tmr = null, esperando = false, poll = null;
 const log = t => { $('log').textContent += t + '\n'; };
 const tr = m => { try { api('traza', '', '', String(m).slice(0, 40)).catch(() => {}); } catch (e) {} };   // marca corta sin texto dictado ni token
-const dg = m => { $('dg').textContent = 'v3.4 ' + m; };
+const dg = m => { $('dg').textContent = 'v3.6 ' + m; };
 const est = (t, c) => { const e = $('est'); e.textContent = t; e.style.background = c || '#eee'; e.style.color = (c && c !== '#eee') ? '#fff' : '#000'; };
 async function api(accion, s, mid, texto, token) {
   const cuerpo = [token === undefined ? tok : token, accion, s || '', mid || '', texto || ''].join('\n');
@@ -44,10 +44,16 @@ function hablar(t) {
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(t); u.lang = 'es-ES';
     let hecho = false;
-    const fin = () => { if (hecho) return; hecho = true; clearTimeout(resp); hablando = false; setTimeout(res, 1200); };   // margen para que no entre la cola de la voz
-    const resp = setTimeout(fin, Math.min(90000, 3000 + t.length * 110));   // respaldo: en Android onend a veces no llega
-    u.onend = u.onerror = fin;
-    speechSynthesis.speak(u);
+    const fin = ok => { if (hecho) return; hecho = true; clearTimeout(resp); clearTimeout(vigia); hablando = false; setTimeout(() => res(ok), 1200); };   // margen para que no entre la cola de la voz
+    const resp = setTimeout(() => fin(ini), Math.min(90000, 3000 + t.length * 110));   // respaldo: en Android onend a veces no llega; si empezó a sonar, cuenta como hablado
+    const t0 = Date.now(); let ini = false;
+    let vs = []; try { vs = speechSynthesis.getVoices(); } catch (e) {}
+    tr('tts voces ' + vs.length + ' es' + vs.filter(v => /^es/i.test(v.lang)).length + ' len' + t.length);   // solo recuentos, sin texto
+    u.onstart = () => { ini = true; tr('tts inicio ' + (Date.now() - t0) + 'ms'); };
+    u.onend = () => { tr('tts fin ' + (Date.now() - t0) + 'ms ini' + (ini ? 1 : 0)); fin(true); };
+    u.onerror = ev => { tr('tts error ' + String(ev && ev.error).slice(0, 20) + ' ' + (Date.now() - t0) + 'ms ini' + (ini ? 1 : 0)); fin(ini); };   // un error tras empezar no desoíe lo ya sonado
+    const vigia = setTimeout(() => { if (!ini && !hecho) { tr('tts sin inicio 6s'); try { speechSynthesis.cancel(); } catch (e) {} fin(false); } }, 6000);
+    try { speechSynthesis.speak(u); } catch (e) { tr('tts excepcion'); fin(false); }
   });
 }
 function abortar_rec() { if (rec) { rec.onend = null; rec.onresult = null; try { rec.abort(); } catch (e) {} rec = null; } }
@@ -56,12 +62,12 @@ function pausar(msg) { abortar_rec(); clearTimeout(rt); est('PAUSA: ' + msg, '#b
 function escuchar() {
   if (!activo || hablando || esperando) return;
   abortar_rec(); clearTimeout(rt); $('esc').style.display = 'none';   // no borra el temporizador de envio: Chrome corta y reabre sin perder el turno
-  const mia = gen; const st = { t0: Date.now(), r: 0, f: 0, e: '-' }; ciclos++; rec = new SR(); rec.lang = 'es-ES'; rec.continuous = true; rec.interimResults = true;
+  const mia = gen; const st = { t0: Date.now(), r: 0, f: 0, e: '-' }; ciclos++; rec = new SR(); rec.lang = 'es-ES'; rec.continuous = true; rec.interimResults = !/android/i.test(navigator.userAgent);   // Android Chrome: con interim devuelve finales acumulativos (informes externos); sin interim no
   rec.onstart = () => { st.t0 = Date.now(); if (mia === gen) est('ESCUCHANDO: habla ahora', '#080'); };
   rec.onresult = e => {
     if (mia !== gen || hablando || esperando) return;
     st.r++;
-    if (evn < 12) { evn++; const b = []; const L = []; for (let i = 0; i < e.results.length && i < 8; i++) { b.push(e.results[i].isFinal ? 'F' : 'n'); L.push(e.results[i][0].transcript.length); } tr('e' + evn + ' n' + e.results.length + ' ri' + e.resultIndex + ' ' + b.join('') + ' ' + L.join('.')); }   // solo estructura: índices, finales y longitudes
+    if (evn < 12) { evn++; const b = []; const L = []; for (let i = 0; i < e.results.length && i < 8; i++) { b.push(e.results[i].isFinal ? 'F' : 'n'); L.push(e.results[i][0].transcript.length); } let P = ''; for (let i = 1; i < e.results.length && i < 8; i++) { const a = e.results[i-1][0].transcript, c = e.results[i][0].transcript; P += (a && c.startsWith(a)) ? 'p' : '-'; } tr('e' + evn + ' ri' + e.resultIndex + ' F' + b.filter(x => x === 'F').length + '/' + e.results.length + ' ' + L.join('.') + ' ' + P); }   // solo estructura: índices, finales y longitudes
     const antes = curtxt.length;
     curtxt = colapsar(e.results);   // texto completo de ESTA sesión del reconocedor, sin duplicados
     if (curtxt.length > antes) { st.f++; vacios = 0; }   // solo texto nuevo cuenta como voz
@@ -105,10 +111,10 @@ async function enviar() {
   }
   if (g !== gen) return;
   if (!enviado) { log('NO enviado: ' + ult.slice(0, 40)); tr('env fallo ' + ult.slice(0, 24)); esperando = false; vacios = 0; escuchar(); return; }
-  est('Esperando respuesta de Insti', '#05a'); let n = 0, ocupado = false;
+  sinResp = true; est('Esperando respuesta de Insti', '#05a'); let n = 0, ocupado = false; const ti = Date.now(); let avisado = false;
   poll = setInterval(async () => {
     if (g !== gen || !activo) return clearInterval(poll);
-    if (ocupado) return; ocupado = true;
+    if (ocupado) return; ocupado = true; if (!avisado && Date.now() - ti > 75000) { avisado = true; log('Sigo esperando respuesta de Insti (la frase llegó).'); }
     if (++n > 225) { clearInterval(poll); log('Sin respuesta en 15 min.'); return parar(); }   // ~4 s por vuelta
     const r = await api('recoger', ses, '', '');
     ocupado = false;
@@ -117,11 +123,18 @@ async function enviar() {
     clearInterval(poll);
     if (r === '§FIN§') { log('Sesión cerrada.'); return parar(true); }
     if (/^ERR/.test(r)) { log('Error del servicio: ' + r); return parar(); }
-    log('Insti: ' + r);
-    await hablar(r);
+    sinResp = false; ultResp = r; log('Insti: ' + r);
+    const okVoz = await hablar(r);
     if (g !== gen || !activo) return;
-    await api('ack', ses, '', '');
-    esperando = false; vacios = 0; escuchar();
+    await api('ack', ses, '', '');   // ack = respuesta recibida y mostrada en pantalla; la voz se registra aparte
+    esperando = false; vacios = 0;
+    if (okVoz) { tr('voz ok'); escuchar(); }
+    else {   // la voz falló: NO reabrir el micro como si se completara; la respuesta queda escrita y se puede OÍR con un gesto
+      vozPendiente = true; $('oir').style.display = '';
+      est('Respuesta recibida; la voz falló. Pulsa OÍR la respuesta', '#b60');
+      log('La voz no pudo sonar (el navegador la bloqueó o falló). La respuesta está escrita arriba; pulsa OÍR la respuesta para intentarlo de nuevo.');
+      tr('voz fallida');
+    }
   }, 4000);
 }
 async function iniciar() {
@@ -130,13 +143,14 @@ async function iniciar() {
   const r = await api('inicio', '', '', '');
   if (!/^\d+$/.test(r)) return log('No se pudo abrir: ' + r);
   gen++; ses = r; activo = true;
-  try { wl = await navigator.wakeLock.request('screen'); } catch (e) {} esperando = false; buf = ''; log('Inicio del chat'); reinicios = []; ciclos = 0; evn = 0; tr('ini v3.4');
+  try { wl = await navigator.wakeLock.request('screen'); } catch (e) {} esperando = false; buf = ''; log('Inicio del chat'); reinicios = []; ciclos = 0; evn = 0; tr('ini v3.6');
   vacios = 0; await hablar('Inicio del chat.'); escuchar();
 }
 async function parar(silencioso) {   // PARAR: corta la voz, cierra el micrófono y la sesión
   gen++; try { if (wl) wl.release(); } catch (e) {} wl = null; speechSynthesis.cancel(); clearInterval(poll); detener_escucha();
-  const s = ses; activo = false; hablando = false; esperando = false; ses = ''; est('Parado');$('esc').style.display = 'none';
+  const s = ses, cancelada = sinResp; sinResp = false; ultResp = ''; vozPendiente = false; activo = false; hablando = false; esperando = false; ses = ''; est(cancelada ? 'Parado: sin respuesta de Insti' : 'Parado');$('esc').style.display = 'none';$('oir').style.display = 'none';
   if (s) { try { await api('fin', s, '', ''); } catch (e) {} }
+  if (cancelada) { log('Cancelado: Insti no llegó a responder a tu última frase.'); tr('parar sin respuesta'); }
   if (!silencioso) log('Parado.');
 }
 async function emparejar() {
@@ -148,7 +162,15 @@ async function emparejar() {
   log('Tiempo agotado.');
 }
 if (!SR) log('Este navegador no ofrece la función de dictado de esta página. Prueba en Google Chrome; no es un problema del permiso del micrófono.');
-$('esc').onclick = () => { if (activo && !hablando && !esperando) { vacios = 0; escuchar(); } };
+$('esc').onclick = () => { if (activo && !hablando && !esperando) { vozPendiente = false; $('oir').style.display = 'none'; vacios = 0; escuchar(); } };
+$('oir').onclick = async () => {   // reintento con gesto explícito: reproduce la respuesta YA recibida; no reenvía dictado ni repite ack
+  if (!activo || !vozPendiente || !ultResp || hablando) return;
+  $('oir').style.display = 'none'; est('Reintentando la voz...', '#05a');
+  const ok = await hablar(ultResp);
+  if (!activo) return;
+  if (ok) { vozPendiente = false; tr('voz ok reintento'); vacios = 0; escuchar(); }
+  else { $('oir').style.display = ''; est('La voz sigue fallando. La respuesta está escrita arriba', '#b60'); tr('voz fallida reintento'); }
+};
 $('ini').onclick = iniciar; $('parar').onclick = () => parar(); $('emp').onclick = emparejar;
 addEventListener('pagehide', () => { if (activo) parar(true); });
 </script></html>
