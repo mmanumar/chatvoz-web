@@ -1,11 +1,11 @@
 <!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Chat voz v3.8</title>
+<title>Chat voz v3.9</title>
 <style>body{font:18px system-ui;margin:16px;max-width:640px}button{font:inherit;padding:14px 18px;margin:4px 4px 4px 0}#parar{background:#c00;color:#fff;border:0;border-radius:12px;width:100%;padding:30px 0;font-size:26px;font-weight:700;margin:10px 0}#log{white-space:pre-wrap;border:1px solid #ccc;padding:8px;min-height:8em}#est{font-weight:600}</style>
-<h2>Chat voz (prototipo) <small>v3.8</small></h2>
+<h2>Chat voz (prototipo) <small>v3.9</small></h2>
 <p id="est" style="font-weight:bold;padding:12px;border-radius:8px;background:#eee">Parado</p>
 <button id="parar">PARAR</button><br><button id="esc" style="display:none">ESCUCHAR otra vez</button><button id="oir" style="display:none">OÍR la respuesta</button><button id="ini">Iniciar</button><button id="emp">Emparejar</button>
 <p>Silencio antes de enviar (s): <input id="sil" type="number" value="3" min="2" max="30" style="width:4em"></p>
-<p id="dg" style="font:13px monospace;color:#555">v3.8 sin ciclos todavía</p>
+<p id="dg" style="font:13px monospace;color:#555">v3.9 sin ciclos todavía</p>
 <div id="log"></div>
 <script>
 // Sin secretos en este archivo. El token del dispositivo lo entrega el servidor tras aprobar el codigo y se guarda solo en este navegador.
@@ -13,9 +13,10 @@ const URL_SERVICIO = 'https://script.google.com/macros/s/AKfycbxf_NuM67zps7yyUO6
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const $ = id => document.getElementById(id);
 let sinResp = false, ultResp = '', vozPendiente = false, evn = 0, curtxt = '', ciclos = 0, reinicios = [], ultprov = '', vacios = 0, rt = null, gen = 0, wl = null, tok = localStorage.getItem('cv_tok') || '', ses = '', activo = false, hablando = false, rec = null, buf = '', tmr = null, esperando = false, poll = null;
+let vadOn = false, vadStream = null, vadCtx = null, vadAn = null, vadDatos = null, vadTimer = null, vadUmbral = 0.02, ultVozMs = 0, recMeta = null, enviarArmado = false, vozAcumMs = 0, avisoCuelgue = false;
 const log = t => { $('log').textContent += t + '\n'; };
 const tr = m => { try { api('traza', '', '', String(m).slice(0, 40)).catch(() => {}); } catch (e) {} };   // marca corta sin texto dictado ni token
-const dg = m => { $('dg').textContent = 'v3.8 ' + m; };
+const dg = m => { $('dg').textContent = 'v3.9 ' + m; };
 const est = (t, c) => { const e = $('est'); e.textContent = t; e.style.background = c || '#eee'; e.style.color = (c && c !== '#eee') ? '#fff' : '#000'; };
 async function api(accion, s, mid, texto, token) {
   const cuerpo = [token === undefined ? tok : token, accion, s || '', mid || '', texto || ''].join('\n');
@@ -41,6 +42,81 @@ function colapsar(res) {
   return partes.join(' ');
 }
 const norm = t => t.toLowerCase().replace(/[.,;:!?¡¿]/g, '').replace(/\s+/g, ' ').trim();
+
+// --- v3.9: medicion de silencio REAL por energia de micro (AnalyserNode). ---
+// decideVad: logica pura (bancable en node). e = estado {energia, ahora, hayTexto, esperando, hablando, ultVozMs, recT0, recResults, silMsObjetivo, enviarArmado, reinicioVad}
+// devuelve {accion:'enviar'|'reiniciar'|null, ultVozMs}
+function decideVad(e) {
+  const HAY_VOZ = e.energia > vadUmbral;
+  const ultVozMs = HAY_VOZ ? e.ahora : e.ultVozMs;
+  if (e.hablando || e.esperando) return { accion: null, ultVozMs };
+  const silMs = e.ahora - ultVozMs;
+  // 1) hay texto reconocido y silencio real mantenido -> enviar (una sola vez)
+  if (e.hayTexto && !e.enviarArmado && ultVozMs > 0 && silMs >= e.silMsObjetivo) return { accion: 'enviar', ultVozMs };
+  // 2) CUELGUE del reconocedor: hubo voz (>=2 s acumulados) y CERO resultados.
+  //    Mientras siga habiendo voz: SOLO aviso visible, no se toca nada (no se corta dictado).
+  if (!e.hayTexto && e.recResults === 0 && e.vozAcumMs >= 15000 && silMs < e.silMsObjetivo && !e.avisoCuelgue) return { accion: 'avisar', ultVozMs };
+  //    Cuando ya hizo la pausa (silencio confirmado): reinicio AHORA seguro (no hay audio que cortar) + mensaje de repeticion.
+  if (!e.hayTexto && e.recResults === 0 && e.vozAcumMs >= 2000 && ultVozMs > 0 && silMs >= e.silMsObjetivo + 2000) return { accion: 'recuperar', ultVozMs };   // +2 s de gracia: un resultado tardío normal llega antes
+  return { accion: null, ultVozMs };
+}
+async function prepararVad() {
+  vadOn = false;
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { log('Este navegador no permite medir el micrófono; uso el método anterior.'); return false; }
+    vadStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    vadCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const fuente = vadCtx.createMediaStreamSource(vadStream);
+    vadAn = vadCtx.createAnalyser(); vadAn.fftSize = 512;
+    fuente.connect(vadAn);   // sin salida a altavoz: solo medición
+    vadDatos = new Float32Array(vadAn.fftSize);
+    est('Calibrando el micrófono: guarda silencio 2 segundos', '#b60');
+    const t0 = Date.now(); let suelo = 0, n = 0;
+    while (Date.now() - t0 < 2000) {
+      await new Promise(z => setTimeout(z, 100));
+      vadAn.getFloatTimeDomainData(vadDatos);
+      let s = 0; for (let i = 0; i < vadDatos.length; i++) s += vadDatos[i] * vadDatos[i];
+      suelo += Math.sqrt(s / vadDatos.length); n++;
+    }
+    suelo = n ? suelo / n : 0;
+    vadUmbral = Math.max(0.012, suelo * 2.5);
+    vadOn = true; tr('vad on umbral ' + Math.round(vadUmbral * 1000));
+    log('Medición de silencio activa (umbral ' + vadUmbral.toFixed(3) + ').');
+    vadTimer = setInterval(vadTick, 100);
+    return true;
+  } catch (e) {
+    log('No pude medir el micrófono (' + String(e && e.name || e).slice(0, 30) + '); uso el método de antes (el envío se arma al reconocer texto).');
+    tr('vad off ' + String(e && e.name || e).slice(0, 20));
+    try { if (vadStream) vadStream.getTracks().forEach(t => t.stop()); } catch (e2) {}
+    try { if (vadCtx) vadCtx.close(); } catch (e3) {}
+    vadStream = null; vadCtx = null; vadAn = null;
+    return false;
+  }
+}
+function vadTick() {
+  if (!vadOn || !vadAn) return;
+  vadAn.getFloatTimeDomainData(vadDatos);
+  let s = 0; for (let i = 0; i < vadDatos.length; i++) s += vadDatos[i] * vadDatos[i];
+  const energia = Math.sqrt(s / vadDatos.length);
+  if (rec && energia > vadUmbral) vozAcumMs += 100;
+  const d = decideVad({ energia, ahora: Date.now(), hayTexto: !!(buf.trim() || curtxt), esperando, hablando, ultVozMs, recT0: recMeta ? recMeta.t0 : 0, recResults: recMeta ? recMeta.r : 0, silMsObjetivo: Math.max(2, +$('sil').value) * 1000, enviarArmado, vozAcumMs, avisoCuelgue });
+  ultVozMs = d.ultVozMs;
+  if (d.accion === 'enviar') { enviarArmado = true; tr('vad envia sil ' + Math.round((Date.now() - ultVozMs) / 100) / 10 + 's'); enviar(); }
+  else if (d.accion === 'avisar') { avisoCuelgue = true; tr('vad cuelgue aviso'); est('Te escucho, pero el reconocedor no está escribiendo. Al hacer una pausa se reiniciará solo.', '#b60'); }
+  else if (d.accion === 'recuperar') {
+    tr('vad recupera en silencio'); avisoCuelgue = false; vozAcumMs = 0;
+    est('No llegó tu frase; el reconocedor se ha reiniciado. Repítela, por favor.', '#c00');
+    log('No llegó tu frase: el reconocedor no la escribió. Ya está reiniciado; repítela, por favor.');
+    abortar_rec(); escuchar();
+  }
+}
+function cerrarVad() {
+  clearInterval(vadTimer); vadTimer = null; vadOn = false; ultVozMs = 0; enviarArmado = false; vozAcumMs = 0; avisoCuelgue = false;
+  try { if (vadStream) vadStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+  try { if (vadCtx) vadCtx.close(); } catch (e) {}
+  vadStream = null; vadCtx = null; vadAn = null;
+}
+
 function hablar(t) {
   return new Promise(res => {
     detener_escucha(); hablando = true; est('Insti HABLA: no hables', '#05a');
@@ -65,17 +141,17 @@ function pausar(msg) { abortar_rec(); clearTimeout(rt); est('PAUSA: ' + msg, '#b
 function escuchar() {
   if (!activo || hablando || esperando) return;
   abortar_rec(); clearTimeout(rt); $('esc').style.display = 'none';   // no borra el temporizador de envio: Chrome corta y reabre sin perder el turno
-  const mia = gen; const st = { t0: Date.now(), r: 0, f: 0, e: '-' }; ciclos++; rec = new SR(); rec.lang = 'es-ES'; rec.continuous = true; rec.interimResults = !/android/i.test(navigator.userAgent);   // Android Chrome: con interim devuelve finales acumulativos (informes externos); sin interim no
+  const mia = gen; const st = { t0: Date.now(), r: 0, f: 0, e: '-' }; recMeta = st; vozAcumMs = 0; avisoCuelgue = false; ciclos++; rec = new SR(); rec.lang = 'es-ES'; rec.continuous = true; rec.interimResults = !/android/i.test(navigator.userAgent);   // Android Chrome: con interim devuelve finales acumulativos (informes externos); sin interim no
   rec.onstart = () => { st.t0 = Date.now(); if (mia === gen) est('ESCUCHANDO: habla ahora', '#080'); };
   rec.onresult = e => {
     if (mia !== gen || hablando || esperando) return;
-    st.r++;
+    st.r++; vozAcumMs = 0; avisoCuelgue = false;
     if (evn < 12) { evn++; const b = []; const L = []; for (let i = 0; i < e.results.length && i < 8; i++) { b.push(e.results[i].isFinal ? 'F' : 'n'); L.push(e.results[i][0].transcript.length); } let P = ''; for (let i = 1; i < e.results.length && i < 8; i++) { const a = e.results[i-1][0].transcript, c = e.results[i][0].transcript; P += (a && c.startsWith(a)) ? 'p' : '-'; } tr('e' + evn + ' ri' + e.resultIndex + ' F' + b.filter(x => x === 'F').length + '/' + e.results.length + ' ' + L.join('.') + ' ' + P); }   // solo estructura: índices, finales y longitudes
     const antes = curtxt.length;
     curtxt = colapsar(e.results);   // texto completo de ESTA sesión del reconocedor, sin duplicados
     if (curtxt.length > antes) { st.f++; vacios = 0; }   // solo texto nuevo cuenta como voz
-    clearTimeout(tmr);
-    if (buf.trim() || curtxt) tmr = setTimeout(enviar, Math.max(2, +$('sil').value) * 1000);   // el temporizador se reinicia con cada voz
+    ultVozMs = Date.now(); clearTimeout(tmr);
+    if (!vadOn && (buf.trim() || curtxt)) tmr = setTimeout(enviar, Math.max(2, +$('sil').value) * 1000);   // metodo antiguo solo si no hay medicion de silencio
   };
   rec.onend = () => {
     if (mia !== gen || !activo || hablando || esperando) return;
@@ -100,7 +176,7 @@ function escuchar() {
 }
 async function enviar() {
   const t = (buf + ' ' + curtxt).replace(/\s+/g, ' ').trim(); buf = ''; curtxt = ''; if (!t || !activo) return;
-  const g = gen; detener_escucha(); esperando = true; est('Enviando...', '#05a');
+  const g = gen; detener_escucha(); esperando = true; enviarArmado = false; ultVozMs = 0; vozAcumMs = 0; avisoCuelgue = false; est('Enviando...', '#05a');
   if (norm(t) === 'fin del chat') { await parar(); return; }
   log('Tú: ' + t);
   let enviado = false, ult = '';
@@ -148,11 +224,11 @@ async function iniciar() {
   const r = await api('inicio', '', '', '');
   if (!/^\d+$/.test(r)) return log('No se pudo abrir: ' + r);
   gen++; ses = r; activo = true;
-  try { wl = await navigator.wakeLock.request('screen'); } catch (e) {} esperando = false; buf = ''; log('Inicio del chat'); reinicios = []; ciclos = 0; evn = 0; tr('ini v3.8');
-  vacios = 0; await hablar('Inicio del chat.'); escuchar();
+  try { wl = await navigator.wakeLock.request('screen'); } catch (e) {} esperando = false; buf = ''; log('Inicio del chat'); reinicios = []; ciclos = 0; evn = 0; tr('ini v3.9');
+  vacios = 0; ultVozMs = 0; enviarArmado = false; vozAcumMs = 0; avisoCuelgue = false; await prepararVad(); await hablar('Inicio del chat.'); ultVozMs = 0; escuchar();
 }
 async function parar(silencioso) {   // PARAR: corta la voz, cierra el micrófono y la sesión
-  gen++; try { if (wl) wl.release(); } catch (e) {} wl = null; speechSynthesis.cancel(); clearInterval(poll); detener_escucha();
+  gen++; try { if (wl) wl.release(); } catch (e) {} wl = null; speechSynthesis.cancel(); clearInterval(poll); detener_escucha(); cerrarVad();
   const s = ses, cancelada = sinResp; sinResp = false; ultResp = ''; vozPendiente = false; activo = false; hablando = false; esperando = false; ses = ''; est(cancelada ? 'Parado: sin respuesta de Insti' : 'Parado');$('esc').style.display = 'none';$('oir').style.display = 'none';
   if (s) { try { await api('fin', s, '', ''); } catch (e) {} }
   if (cancelada) { log('Cancelado: Insti no llegó a responder a tu última frase.'); tr('parar sin respuesta'); }
