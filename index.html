@@ -7,9 +7,9 @@
 <p>Silencio antes de enviar (s): <input id="sil" type="number" value="3" min="2" max="30" style="width:4em"></p>
 <p id="dg" style="font:13px monospace;color:#555">v4.0 sin ciclos todavía</p>
 <div id="log"></div>
-<p style="margin:14px 0 4px">Si la voz falla, escribe aquí:</p>
+<p style="margin:14px 0 4px">Si la voz falla, escribe aquí. Al pulsar Enviar sale tu voz si se reconoció algo; si no, tu texto:</p>
 <textarea id="txt" rows="2" style="width:100%;font:inherit;box-sizing:border-box" placeholder="Escribe tu mensaje"></textarea>
-<button id="env" disabled>Enviar texto</button>
+<button id="env" disabled>Enviar</button>
 <script>
 // Sin secretos en este archivo. El token del dispositivo lo entrega el servidor tras aprobar el codigo y se guarda solo en este navegador.
 const URL_SERVICIO = 'https://script.google.com/macros/s/AKfycbxf_NuM67zps7yyUO6rXRtebunsJPz3su5z2f7cKL4ggObfsyuCZySR7bRJ5dptPDPi/exec';
@@ -181,7 +181,7 @@ function escuchar() {
 }
 async function enviar(txtManual) {
   let t;
-  if (txtManual !== undefined) { t = String(txtManual).replace(/\s+/g, ' ').trim(); if (curtxt) { buf = (buf + ' ' + curtxt).replace(/\s+/g, ' ').trim() + ' '; curtxt = ''; } }   // v4.0 Plan B: texto escrito, misma ruta; la voz reconocida sin enviar se conserva en buf
+  if (txtManual !== undefined) { t = String(txtManual).replace(/\s+/g, ' ').trim(); }   // v4.0 Plan B: texto escrito, misma ruta (solo se ofrece cuando NO hay voz reconocida pendiente)
   else { t = (buf + ' ' + curtxt).replace(/\s+/g, ' ').trim(); buf = ''; curtxt = ''; }
   if (!t || !activo) return;
   const g = gen; detener_escucha(); esperando = true; enviarArmado = false; ultVozMs = 0; vozAcumMs = 0; avisoCuelgue = false; est('Enviando...', '#05a');
@@ -264,11 +264,19 @@ $('oir').onclick = async () => {   // reintento con gesto explícito: reproduce 
   if (ok) { vozPendiente = false; tr('voz ok reintento'); vacios = 0; escuchar(); }
   else { $('oir').style.display = ''; est('La voz sigue fallando. La respuesta está escrita arriba', '#b60'); tr('voz fallida reintento'); }
 };
-async function enviarTexto() {   // v4.0: Plan B texto; nada se envía solo al escribir: solo este botón envía
-  const t = $('txt').value.replace(/\s+/g, ' ').trim();
-  if (!t) return;
+async function enviarTexto() {   // v4.0: UN boton = UNA fuente. Si la voz reconocio texto sin enviar, sale esa; si no, lo escrito. Nunca las dos.
   if (!activo) return log('Pulsa Iniciar primero: el texto va por la misma sesión que la voz.');
   if (esperando) return log('Esperando respuesta de Insti; tu texto no se pierde: sigue abajo para cuando llegue.');
+  const vozPend = (buf + ' ' + curtxt).replace(/\s+/g, ' ').trim();
+  if (vozPend) {   // prioridad a la voz reconocida; lo escrito queda de borrador, NO se manda solo
+    log('He mandado lo que reconoció la voz. Tu texto escrito sigue abajo: si lo quieres mandar, pulsa Enviar otra vez.');
+    tr('env manual eligio voz');
+    await enviar();
+    return;
+  }
+  const t = $('txt').value.replace(/\s+/g, ' ').trim();
+  if (!t) return;
+  tr('env manual eligio caja');
   ultEnvioOk = false; await enviar(t);
   if (ultEnvioOk) { $('txt').value = ''; }   // solo se borra si el servidor confirmó (OK)
   refrescaEnv();
